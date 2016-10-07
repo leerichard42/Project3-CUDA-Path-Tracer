@@ -15,6 +15,8 @@ static bool camchanged = true;
 static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
+static bool sortByMat = false;
+
 float zoom, theta, phi;
 glm::vec3 cameraPosition;
 glm::vec3 ogLookAt; // for recentering the camera
@@ -29,6 +31,12 @@ int height;
 //-------------------------------
 //-------------MAIN--------------
 //-------------------------------
+
+void printState() {
+	printf("----- Settings -----\n");
+	printf("Sort by material: %s\n", sortByMat ? "True" : "False");
+	printf("\n");
+}
 
 int main(int argc, char** argv) {
     startTimeString = currentTimeString();
@@ -65,6 +73,9 @@ int main(int argc, char** argv) {
     theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
     ogLookAt = cam.lookAt;
     zoom = glm::length(cam.position - ogLookAt);
+
+	//Print starting settings
+	printState();
 
     // Initialize CUDA and GL components
     init();
@@ -134,7 +145,7 @@ void runCuda() {
 
         // execute the kernel
         int frame = 0;
-        pathtrace(pbo_dptr, frame, iteration);
+        pathtrace(pbo_dptr, frame, iteration, sortByMat);
 
         // unmap buffer object
         cudaGLUnmapBufferObject(pbo);
@@ -156,12 +167,21 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
       case GLFW_KEY_S:
         saveImage();
         break;
+	  case GLFW_KEY_M:
+		  sortByMat = !sortByMat;
+		  printState();
+		  break;
       case GLFW_KEY_SPACE:
-        camchanged = true;
+		iteration = 0;
+        /*camchanged = true;
         renderState = &scene->state;
         Camera &cam = renderState->camera;
-        cam.lookAt = ogLookAt;
-        break;
+		cameraPosition = cam.position;
+        cam.lookAt = ogLookAt;*/
+
+		sortByMat = false;
+		printState();
+		break;
       }
     }
 }
