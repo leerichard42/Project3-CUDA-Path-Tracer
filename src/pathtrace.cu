@@ -75,6 +75,7 @@ static Geom * dev_geoms = NULL;
 static Material * dev_materials = NULL;
 static PathSegment * dev_paths = NULL;
 static ShadeableIntersection * dev_intersections = NULL;
+static ShadeableIntersection * dev_intersections_cached = NULL;
 thrust::device_ptr<PathSegment> dev_thrust_paths;
 thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections;
 // TODO: static variables for device memory, any extra info you need, etc
@@ -99,6 +100,8 @@ void pathtraceInit(Scene *scene) {
 	cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
 	cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
+	cudaMalloc(&dev_intersections_cached, pixelcount * sizeof(ShadeableIntersection));
+
 	dev_thrust_paths = thrust::device_pointer_cast(dev_paths);
 	dev_thrust_intersections = thrust::device_pointer_cast(dev_intersections);
 
@@ -111,6 +114,7 @@ void pathtraceFree() {
 	cudaFree(dev_geoms);
 	cudaFree(dev_materials);
 	cudaFree(dev_intersections);
+	cudaFree(dev_intersections_cached);
 	// TODO: clean up any extra device memory you created
 
 	checkCUDAError("pathtraceFree");
@@ -253,8 +257,6 @@ __global__ void shadeMaterial(
 		ShadeableIntersection intersection = shadeableIntersections[idx];
 		if (intersection.t > 0.0f) { // if the intersection exists...
 			// Set up the RNG
-			// LOOK: this is how you use thrust's RNG! Please look at
-			// makeSeededRandomEngine as well.
 			thrust::default_random_engine rng = makeSeededRandomEngine(iter, pathSegments[idx].pixelIndex, pathSegments[idx].remainingBounces);
 			thrust::uniform_real_distribution<float> u01(0, 1);
 
@@ -350,7 +352,7 @@ struct material_id_comparator
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
  */
-void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat) {
+void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirstBounce) {
 	const int traceDepth = hst_scene->state.traceDepth;
 	const Camera &cam = hst_scene->state.camera;
 	const int pixelcount = cam.resolution.x * cam.resolution.y;
@@ -410,43 +412,39 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat) {
 		// clean shading chunks
 		cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
-		// tracing
 		dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-		computeIntersections << <numblocksPathSegmentTracing, blockSize1d >> > (
-			depth
-			, num_paths
-			, dev_paths
-			, dev_geoms
-			, hst_scene->geoms.size()
-			, dev_intersections,
-			dev_materials
-			);
-		checkCUDAError("trace one bounce");
-		cudaDeviceSynchronize();
+		// Intersection testing
+		if ((depth == 0 && iter == 1) || !cacheFirstBounce || (cacheFirstBounce && depth > 0)) {
+			computeIntersections << <numblocksPathSegmentTracing, blockSize1d >> > (
+				depth, num_paths, dev_paths, dev_geoms, hst_scene->geoms.size(), dev_intersections, dev_materials);
+			checkCUDAError("computeIntersections failed!");
+			cudaDeviceSynchronize();
+		}
+
+		//Cache first bounce
+		if (depth == 0 && iter == 1) {
+			printf("FIRST BOUNCE PATHS CACHED\n");
+			cudaMemcpy(dev_intersections_cached, dev_intersections, sizeof(ShadeableIntersection) * num_paths, cudaMemcpyDeviceToDevice);
+		}
 
 		//Sort by material on the first pass
 		if (sortByMat && depth == 0) {
 			thrust::sort_by_key(dev_thrust_intersections, dev_thrust_intersections + num_paths, dev_thrust_paths, material_id_comparator());
 		}
-		depth++;
+		
+		//Compute path shading
+		if (cacheFirstBounce && depth == 0) {
+			shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
+				iter, num_paths, dev_intersections_cached, dev_paths, dev_materials);
+			checkCUDAError("shadeMaterial failed!");
+		}
+		else {
+			shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
+				iter, num_paths, dev_intersections, dev_paths, dev_materials);
+			checkCUDAError("shadeMaterial failed!");
+		}
 
-		// TODO:
-		// --- Shading Stage ---
-		// Shade path segments based on intersections and generate new rays by
-		// evaluating the BSDF.
-		// Start off with just a big kernel that handles all the different
-		// materials you have in the scenefile.
-		// TODO: compare between directly shading the path segments and shading
-		// path segments that have been reshuffled to be contiguous in memory.
-
-		shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
-			iter,
-			num_paths,
-			dev_intersections,
-			dev_paths,
-			dev_materials
-			);
-
+		//Compact paths
 		num_paths = thrust::partition(dev_thrust_paths, dev_thrust_paths + num_paths, is_not_terminated()) - dev_thrust_paths;
 
 		/*if (iter == 1) {
@@ -470,6 +468,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat) {
 			delete(host_inxs);
 		}*/
 
+		depth++;
 		if (num_paths == 0) {
 			iterationComplete = true;
 		}
