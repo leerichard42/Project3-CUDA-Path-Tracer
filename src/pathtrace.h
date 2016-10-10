@@ -3,6 +3,10 @@
 #include <vector>
 #include "scene.h"
 
-void pathtraceInit(Scene *scene);
+#define NOAA 0
+#define AA 1
+#define ADAPTIVE 2
+
+void pathtraceInit(Scene *scene, int antiAliasing);
 void pathtraceFree();
-void pathtrace(uchar4 *pbo, int frame, int iteration, bool sortByMat, bool cacheFirstBounce);
+void pathtrace(uchar4 *pbo, int frame, int iteration, bool sortByMat, bool cacheFirstBounce, bool viewEdges);

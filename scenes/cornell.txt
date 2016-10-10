@@ -72,7 +72,7 @@ EMITTANCE   0
 CAMERA
 RES         800 800
 FOVY        45
-ITERATIONS  5000
+ITERATIONS  500
 DEPTH       8
 FILE        cornell
 EYE         0.0 5 10.5
@@ -128,18 +128,26 @@ TRANS       5 5 0
 ROTAT       0 0 0
 SCALE       .01 10 10
 
-// Diffuse Sphere
-OBJECT 6
-sphere
-material 4
-TRANS       2 5 -2
-ROTAT       0 0 0
-SCALE       3 3 3
+//// Diffuse Sphere
+//OBJECT 6
+//sphere
+//material 4
+//TRANS       2 5 -2
+//ROTAT       0 0 0
+//SCALE       3 3 3
 
-// Reflective Sphere
-OBJECT 7
-sphere
-material 5
-TRANS       -2 5 2
-ROTAT       0 0 0
-SCALE       3 3 3
+//// Reflective Sphere
+//OBJECT 7
+//sphere
+//material 5
+//TRANS       -2 5 2
+//ROTAT       0 0 0
+//SCALE       3 3 3
+
+//// Glass Sphere
+//OBJECT 8
+//sphere
+//material 6
+//TRANS       0 1.5 0
+//ROTAT       0 0 0
+//SCALE       3 3 3

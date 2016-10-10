@@ -16,7 +16,9 @@ static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
 static bool sortByMat = false;
-static bool cacheFirstBounce = true;
+static bool cacheFirstBounce = false;
+static int antiAliasing = NOAA;
+static bool viewEdges = false;
 
 float zoom, theta, phi;
 glm::vec3 cameraPosition;
@@ -33,8 +35,8 @@ int height;
 //-------------MAIN--------------
 //-------------------------------
 
-void printState(bool printMat = true, bool printCache = true) {
-	if (printMat && printCache) 
+void printState(bool printMat = true, bool printCache = true, bool printAA = true, bool printEdge = true) {
+	if (printMat && printCache && printAA && printEdge) 
 		printf("----- Settings -----\n");
 
 	if (printMat)
@@ -43,6 +45,18 @@ void printState(bool printMat = true, bool printCache = true) {
 	if (printCache)
 		printf("Cache first bounce: %s\n", cacheFirstBounce ? "True" : "False");
 	
+	if (printAA)
+		printf("Anti Aliasing: %s\n", antiAliasing == NOAA ? "None" : (antiAliasing == AA ? "Stochastic Supersampling" : "Adaptive Supersampling"));
+
+	if (printEdge) {
+		if (antiAliasing == ADAPTIVE || (printMat && printCache && printAA && printEdge)) {
+			printf("Edge View: %s\n", viewEdges ? "On" : "Off");
+		}
+		else {
+			printf("Can only toggle edges in adaptive sampling mode!\n");
+		}
+	}
+
 	printf("\n--------------------\n");
 	printf("\n");
 }
@@ -104,7 +118,7 @@ void saveImage() {
 		for (int y = 0; y < height; y++) {
 			int index = x + (y * width);
 			glm::vec3 pix = renderState->image[index];
-			img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+			img.setPixel(width - 1 - x, y, pix);
 		}
 	}
 
@@ -144,7 +158,7 @@ void runCuda() {
 
 	if (iteration == 0) {
 		pathtraceFree();
-		pathtraceInit(scene);
+		pathtraceInit(scene, antiAliasing);
 	}
 
 	if (iteration < renderState->iterations) {
@@ -154,7 +168,7 @@ void runCuda() {
 
 		// execute the kernel
 		int frame = 0;
-		pathtrace(pbo_dptr, frame, iteration, sortByMat, cacheFirstBounce);
+		pathtrace(pbo_dptr, frame, iteration, sortByMat, cacheFirstBounce, viewEdges);
 
 		// unmap buffer object
 		cudaGLUnmapBufferObject(pbo);
@@ -177,24 +191,34 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 		case GLFW_KEY_S:
 			saveImage();
 			break;
+		case GLFW_KEY_A:
+			iteration = 0;
+			antiAliasing = (antiAliasing + 1) % 3;
+			if (antiAliasing == NOAA) {
+				viewEdges = false;
+			}
+			printState(false, false, true, false);
+			break;
 		case GLFW_KEY_M:
 			sortByMat = !sortByMat;
-			printState(true, false);
+			printState(true, false, false, false);
 			break;
 		case GLFW_KEY_C:
 			cacheFirstBounce = !cacheFirstBounce;
-			printState(false, true);
+			printState(false, true, false, false);
+			break;
+		case GLFW_KEY_E:
+			if (antiAliasing == ADAPTIVE) {
+				viewEdges = !viewEdges;
+			}
+			printState(false, false, false, true);
 			break;
 		case GLFW_KEY_SPACE:
 			iteration = 0;
-			/*camchanged = true;
-			renderState = &scene->state;
-			Camera &cam = renderState->camera;
-			cameraPosition = cam.position;
-			cam.lookAt = ogLookAt;*/
-
 			sortByMat = false;
 			cacheFirstBounce = false;
+			antiAliasing = NOAA;
+			viewEdges = false;
 			printState();
 			break;
 		}
