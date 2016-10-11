@@ -15,6 +15,7 @@ static bool camchanged = true;
 static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
+static bool streamCompaction = true;
 static bool sortByMat = false;
 static bool cacheFirstBounce = false;
 static int antiAliasing = NOAA;
@@ -35,9 +36,12 @@ int height;
 //-------------MAIN--------------
 //-------------------------------
 
-void printState(bool printMat = true, bool printCache = true, bool printAA = true, bool printEdge = true) {
-	if (printMat && printCache && printAA && printEdge) 
+void printState(bool printStream = true, bool printMat = true, bool printCache = true, bool printAA = true, bool printEdge = true) {
+	if (printStream && printMat && printCache && printAA && printEdge)
 		printf("----- Settings -----\n");
+
+	if (printStream)
+		printf("Stream compaction: %s\n", streamCompaction ? "On" : "Off");
 
 	if (printMat)
 		printf("Sort by material: %s\n", sortByMat ? "True" : "False");
@@ -49,7 +53,7 @@ void printState(bool printMat = true, bool printCache = true, bool printAA = tru
 		printf("Anti Aliasing: %s\n", antiAliasing == NOAA ? "None" : (antiAliasing == AA ? "Stochastic Supersampling" : "Adaptive Supersampling"));
 
 	if (printEdge) {
-		if (antiAliasing == ADAPTIVE || (printMat && printCache && printAA && printEdge)) {
+		if (antiAliasing == ADAPTIVE || (printStream && printMat && printCache && printAA && printEdge)) {
 			printf("Edge View: %s\n", viewEdges ? "On" : "Off");
 		}
 		else {
@@ -168,7 +172,7 @@ void runCuda() {
 
 		// execute the kernel
 		int frame = 0;
-		pathtrace(pbo_dptr, frame, iteration, sortByMat, cacheFirstBounce, viewEdges);
+		pathtrace(pbo_dptr, frame, iteration, sortByMat, cacheFirstBounce, viewEdges, streamCompaction);
 
 		// unmap buffer object
 		cudaGLUnmapBufferObject(pbo);
@@ -195,30 +199,35 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 		case GLFW_KEY_S:
 			saveImage();
 			break;
+		case GLFW_KEY_T:
+			streamCompaction = !streamCompaction;
+			printState(true, false, false, false, false);
+			break;
 		case GLFW_KEY_A:
 			iteration = 0;
 			antiAliasing = (antiAliasing + 1) % 3;
 			if (antiAliasing == NOAA) {
 				viewEdges = false;
 			}
-			printState(false, false, true, false);
+			printState(false, false, false, true, false);
 			break;
 		case GLFW_KEY_M:
 			sortByMat = !sortByMat;
-			printState(true, false, false, false);
+			printState(false, true, false, false, false);
 			break;
 		case GLFW_KEY_C:
 			cacheFirstBounce = !cacheFirstBounce;
-			printState(false, true, false, false);
+			printState(false, false, true, false, false);
 			break;
 		case GLFW_KEY_E:
 			if (antiAliasing == ADAPTIVE) {
 				viewEdges = !viewEdges;
 			}
-			printState(false, false, false, true);
+			printState(false, false, false, false, true);
 			break;
 		case GLFW_KEY_SPACE:
 			iteration = 0;
+			streamCompaction = true;
 			sortByMat = false;
 			cacheFirstBounce = false;
 			antiAliasing = NOAA;

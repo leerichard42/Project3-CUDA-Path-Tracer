@@ -193,7 +193,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 			segment.remainingBounces = traceDepth;
 			segment.pathId = index;
 		}
-		else if (antiAliasing == AA || antiAliasing == ADAPTIVE) {
+		else {
 			for (int i = 0; i < 4; i++) {
 				thrust::default_random_engine rng_x = makeSeededRandomEngine(0, index, i);
 				thrust::default_random_engine rng_y = makeSeededRandomEngine(0, index, 2 * i);
@@ -377,17 +377,8 @@ __global__ void shadeMaterial(
 	)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx < num_paths/* && !pathSegments_in[idx].isTerminated*/)
+	if (idx < num_paths && !pathSegments_in[idx].isTerminated)
 	{
-		if (depth == 0) {
-			pathSegments_out[idx].color = glm::vec3(1.0f, 1.0f, 1.0f);
-			pathSegments_out[idx].isTerminated = pathSegments_in[idx].isTerminated;
-
-			pathSegments_out[idx].pixelIndex = pathSegments_in[idx].pixelIndex;
-			pathSegments_out[idx].remainingBounces = traceDepth;
-			pathSegments_out[idx].pathId = pathSegments_in[idx].pathId;
-		}
-
 		ShadeableIntersection intersection = shadeableIntersections[idx];
 		if (intersection.t > 0.0f) { // if the intersection exists...
 			// Set up the RNG
@@ -451,10 +442,10 @@ __global__ void shadeMaterial(
 					pathSegments_out[idx].isTerminated = true;
 				}
 			}
-			// If there was no intersection, color the ray black.
-			// Lots of renderers use 4 channel color, RGBA, where A = alpha, often
-			// used for opacity, in which case they can indicate "no opacity".
-			// This can be useful for post-processing and image compositing.
+		// If there was no intersection, color the ray black.
+		// Lots of renderers use 4 channel color, RGBA, where A = alpha, often
+		// used for opacity, in which case they can indicate "no opacity".
+		// This can be useful for post-processing and image compositing.
 		}
 		else {
 			pathSegments_out[idx].color = glm::vec3(0.0f);
@@ -466,8 +457,6 @@ __global__ void shadeMaterial(
 // Add the current iteration's output to the overall image
 __global__ void finalGather(glm::ivec2 resolution, glm::vec3 * image, PathSegment * iterationPaths, int antiAliasing, glm::vec3* image_edges)
 {
-	//int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
@@ -516,7 +505,7 @@ struct path_id_comparator
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
  */
-void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirstBounce, bool viewEdges) {
+void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirstBounce, bool viewEdges, bool streamCompaction) {
 	const int traceDepth = hst_scene->state.traceDepth;
 	const Camera &cam = hst_scene->state.camera;
 	const int pixelcount = cam.resolution.x * cam.resolution.y;
@@ -584,6 +573,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 
 		//Compute path shading
 		if (cacheFirstBounce && depth == 0) {
+			cudaMemcpy(dev_paths, dev_paths_cached, sizeof(PathSegment) * start_paths, cudaMemcpyDeviceToDevice);
 			shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
 				depth, traceDepth, iter, start_paths, dev_intersections_cached, dev_paths_cached, dev_paths, dev_materials);
 			checkCUDAError("shadeMaterial failed!");
@@ -595,15 +585,17 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 		}
 
 		//Compact paths
-		num_paths = thrust::partition(dev_thrust_paths, dev_thrust_paths + num_paths, is_not_terminated()) - dev_thrust_paths;
+		if (streamCompaction) {
+			num_paths = thrust::partition(dev_thrust_paths, dev_thrust_paths + num_paths, is_not_terminated()) - dev_thrust_paths;
+		}
 
 		depth++;
-		if (num_paths == 0) {
+		if (num_paths == 0 || depth > traceDepth) {
 			iterationComplete = true;
 		}
 	}
 
-	if (antiAliasing == AA || antiAliasing == ADAPTIVE) {
+	if (antiAliasing) {
 		thrust::sort(dev_thrust_paths, dev_thrust_paths + start_paths, path_id_comparator());
 	}
 
