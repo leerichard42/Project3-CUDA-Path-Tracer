@@ -48,21 +48,22 @@ thrust::default_random_engine makeSeededRandomEngine(int iter, int index, int de
 
 //Kernel that processes the current image data based on number of samples and antialiasing.
 __global__ void processImage(glm::ivec2 resolution,
-	int iter, glm::vec3* image_data, glm::vec3* image_out, int antiAliasing) {
+	int iter, glm::vec3* image_data, glm::vec3* image_out, int antiAliasing, glm::vec3* image_edges) {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
 	if (x < resolution.x && y < resolution.y) {
 		int index = x + (y * resolution.x);
+		bool supersample = antiAliasing == ADAPTIVE && image_edges[index].x > 0;
 		glm::vec3 pix = image_data[index];
 
 		glm::vec3 color;
-		if (antiAliasing == NOAA) {
+		if (antiAliasing == NOAA || (antiAliasing == ADAPTIVE && !supersample)) {
 			color.x = glm::clamp(pix.x / iter, 0.f, 1.f);
 			color.y = glm::clamp(pix.y / iter, 0.f, 1.f);
 			color.z = glm::clamp(pix.z / iter, 0.f, 1.f);
 		}
-		else if (antiAliasing == AA || antiAliasing == ADAPTIVE) {
+		else if (antiAliasing == AA || (antiAliasing == ADAPTIVE && supersample)) {
 			color.x = glm::clamp(pix.x / (4.0f * iter), 0.f, 1.f);
 			color.y = glm::clamp(pix.y / (4.0f * iter), 0.f, 1.f);
 			color.z = glm::clamp(pix.z / (4.0f * iter), 0.f, 1.f);
@@ -93,6 +94,7 @@ static glm::vec3 * dev_image_result = NULL;
 static Geom * dev_geoms = NULL;
 static Material * dev_materials = NULL;
 static PathSegment * dev_paths = NULL;
+static PathSegment * dev_paths_cached = NULL;
 static ShadeableIntersection * dev_intersections = NULL;
 static ShadeableIntersection * dev_intersections_cached = NULL;
 thrust::device_ptr<PathSegment> dev_thrust_paths;
@@ -124,6 +126,7 @@ void pathtraceInit(Scene *scene, int aa_state) {
 	}
 
 	cudaMalloc(&dev_paths, start_paths * sizeof(PathSegment));
+	cudaMalloc(&dev_paths_cached, start_paths * sizeof(PathSegment));
 
 	cudaMalloc(&dev_geoms, scene->geoms.size() * sizeof(Geom));
 	cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
@@ -147,6 +150,7 @@ void pathtraceFree() {
 	cudaFree(dev_image_normals);
 	cudaFree(dev_image_result);
 	cudaFree(dev_paths);
+	cudaFree(dev_paths_cached);
 	cudaFree(dev_geoms);
 	cudaFree(dev_materials);
 	cudaFree(dev_intersections);
@@ -163,7 +167,7 @@ void pathtraceFree() {
 * motion blur - jitter rays "in time"
 * lens effect - jitter ray origin positions based on a lens
 */
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments, int antiAliasing)
+__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments, int antiAliasing, glm::vec3* image_edges)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -171,6 +175,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 	if (x < cam.resolution.x && y < cam.resolution.y) {
 		int index = x + (y * cam.resolution.x);
 		thrust::uniform_real_distribution<float> u_jitter(-0.1, 0.1);
+		bool supersample = antiAliasing == ADAPTIVE && image_edges[index].x > 0;
 
 		if (antiAliasing == NOAA) {
 			PathSegment & segment = pathSegments[index];
@@ -186,6 +191,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
 			segment.pixelIndex = index;
 			segment.remainingBounces = traceDepth;
+			segment.pathId = index;
 		}
 		else if (antiAliasing == AA || antiAliasing == ADAPTIVE) {
 			for (int i = 0; i < 4; i++) {
@@ -198,15 +204,29 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 				segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 				segment.isTerminated = false;
 
-				segment.ray.direction = glm::normalize(cam.view
-					- cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
-					+ cam.right * cam.pixelLength.x * ((float)(i % 2) * 0.5f - 0.25f + u_jitter(rng_x))
-					- cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f)
-					+ cam.up * cam.pixelLength.y * ((float)(i / 2) * 0.5f - 0.25f + u_jitter(rng_y))
-					);
+				if (antiAliasing == AA || supersample) {
+					segment.ray.direction = glm::normalize(cam.view
+						- cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
+						+ cam.right * cam.pixelLength.x * ((float)(i % 2) * 0.5f - 0.25f + u_jitter(rng_x))
+						- cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f)
+						+ cam.up * cam.pixelLength.y * ((float)(i / 2) * 0.5f - 0.25f + u_jitter(rng_y))
+						);
+				}
+				else {
+					if (i == 0) {
+						segment.ray.direction = glm::normalize(cam.view
+							- cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
+							- cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f)
+							);
+					}
+					else {
+						segment.isTerminated = true;
+					}
+				}
 
 				segment.pixelIndex = index;
 				segment.remainingBounces = traceDepth;
+				segment.pathId = 4 * index + i;
 			}
 		}
 	}
@@ -218,13 +238,13 @@ __global__ void generateNormalData(Camera cam, int pixelCount, glm::vec3* image,
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 
 	if (index < pixelCount) {
-		//Vary color based on material id
-		thrust::default_random_engine rng = makeSeededRandomEngine(intersections[index].surfaceNormal.x + intersections[index].materialId,
-			intersections[index].surfaceNormal.y + intersections[index].materialId,
-			intersections[index].surfaceNormal.z + intersections[index].materialId);
-		thrust::uniform_real_distribution<float> u01(0, 5.0f);
-		image[index] = glm::mod((0.5f * intersections[index].surfaceNormal + glm::vec3(0.5f)) + 
-			materials[intersections[index].materialId].color + glm::vec3(u01(rng)), 1.0f);
+		if (materials[intersections[index].materialId].emittance) {
+			image[index] = glm::vec3(1.0f);
+		}
+		else {
+			image[index] = (0.5f * intersections[index].surfaceNormal + glm::vec3(0.5f)) *
+				materials[intersections[index].materialId].color;
+		}
 	}
 }
 
@@ -261,7 +281,7 @@ __global__ void generateEdgeData(Camera cam, glm::vec3* image_normals, glm::vec3
 			abs(pix[0] - pix[8]) +
 			abs(pix[2] - pix[6])) / 4.0f;
 
-		if (threshold(0.01f, 0.4f, glm::clamp(1.8f*delta, 0.0f, 1.0f)) > 0.0f){
+		if (glm::clamp(10.0f*delta, 0.0f, 1.0f) > 0.3f){
 			image_edges[index] = glm::vec3(1.0f);
 		}
 	}
@@ -346,20 +366,32 @@ __global__ void computeIntersections(
 }
 
 __global__ void shadeMaterial(
-	int iter
+	int depth
+	, int traceDepth
+	, int iter
 	, int num_paths
 	, ShadeableIntersection * shadeableIntersections
-	, PathSegment * pathSegments
+	, PathSegment * pathSegments_in
+	, PathSegment * pathSegments_out
 	, Material * materials
 	)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx < num_paths && !pathSegments[idx].isTerminated)
+	if (idx < num_paths/* && !pathSegments_in[idx].isTerminated*/)
 	{
+		if (depth == 0) {
+			pathSegments_out[idx].color = glm::vec3(1.0f, 1.0f, 1.0f);
+			pathSegments_out[idx].isTerminated = pathSegments_in[idx].isTerminated;
+
+			pathSegments_out[idx].pixelIndex = pathSegments_in[idx].pixelIndex;
+			pathSegments_out[idx].remainingBounces = traceDepth;
+			pathSegments_out[idx].pathId = pathSegments_in[idx].pathId;
+		}
+
 		ShadeableIntersection intersection = shadeableIntersections[idx];
 		if (intersection.t > 0.0f) { // if the intersection exists...
 			// Set up the RNG
-			thrust::default_random_engine rng = makeSeededRandomEngine(iter, pathSegments[idx].pixelIndex, pathSegments[idx].remainingBounces);
+			thrust::default_random_engine rng = makeSeededRandomEngine(iter, pathSegments_in[idx].pixelIndex, pathSegments_in[idx].remainingBounces);
 			thrust::uniform_real_distribution<float> u01(0, 1);
 
 			Material material = materials[intersection.materialId];
@@ -367,21 +399,21 @@ __global__ void shadeMaterial(
 
 			// If the material indicates that the object was a light, "light" the ray
 			if (material.emittance > 0.0f) {
-				pathSegments[idx].color *= (materialColor * material.emittance);
-				pathSegments[idx].isTerminated = true;
+				pathSegments_out[idx].color *= (materialColor * material.emittance);
+				pathSegments_out[idx].isTerminated = true;
 			}
 			else {
 				//Perfect Specular
 				if (material.hasReflective) {
-					pathSegments[idx].ray.origin = pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction + intersection.surfaceNormal * 0.001f;
-					pathSegments[idx].ray.direction = reflect(pathSegments[idx].ray.direction, intersection.surfaceNormal);
-					pathSegments[idx].color *= material.specular.color;
+					pathSegments_out[idx].ray.origin = pathSegments_in[idx].ray.origin + intersection.t * pathSegments_in[idx].ray.direction + intersection.surfaceNormal * 0.001f;
+					pathSegments_out[idx].ray.direction = reflect(pathSegments_in[idx].ray.direction, intersection.surfaceNormal);
+					pathSegments_out[idx].color *= material.specular.color;
 				}
 				else if (material.hasRefractive) {
 					if (material.indexOfRefraction < FLT_EPSILON){
 						printf("Check index of refraction!\n");
 					}
-					float w = powf(1.0f - abs(dot(intersection.surfaceNormal, pathSegments[idx].ray.direction)), 5.0f);
+					float w = powf(1.0f - abs(dot(intersection.surfaceNormal, pathSegments_in[idx].ray.direction)), 5.0f);
 					float r0 = powf((1.0f - material.indexOfRefraction) / (1.0f + material.indexOfRefraction), 2.0f);
 					float fresnel = r0 + (1 - r0) * w;
 
@@ -394,28 +426,29 @@ __global__ void shadeMaterial(
 					}
 
 					if (intersection.entering && u01(rng) < fresnel){
-						pathSegments[idx].ray.origin = pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction + intersection.surfaceNormal * 0.001f;
-						pathSegments[idx].ray.direction = reflect(pathSegments[idx].ray.direction, intersection.surfaceNormal);
+						pathSegments_out[idx].ray.origin = pathSegments_in[idx].ray.origin + intersection.t * pathSegments_in[idx].ray.direction + intersection.surfaceNormal * 0.001f;
+						pathSegments_out[idx].ray.direction = reflect(pathSegments_in[idx].ray.direction, intersection.surfaceNormal);
 					}
 					else {
-						pathSegments[idx].ray.origin = pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction - intersection.surfaceNormal * 0.001f;
-						pathSegments[idx].ray.direction = refract(normalize(pathSegments[idx].ray.direction), normalize(intersection.surfaceNormal), eta);
+						pathSegments_out[idx].ray.origin = pathSegments_in[idx].ray.origin + intersection.t * pathSegments_in[idx].ray.direction - intersection.surfaceNormal * 0.001f;
+						pathSegments_out[idx].ray.direction = refract(normalize(pathSegments_in[idx].ray.direction), normalize(intersection.surfaceNormal), eta);
 					}
-					pathSegments[idx].color *= materialColor;
+					pathSegments_out[idx].color *= materialColor;
 				}
 				//Imperfect Specular
 				else if (material.specular.exponent > 0) {
 				}
 				//Diffuse
 				else {
-					pathSegments[idx].ray.origin = pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction + intersection.surfaceNormal * 0.001f;
-					pathSegments[idx].ray.direction = calculateRandomDirectionInHemisphere(intersection.surfaceNormal, rng);
-					pathSegments[idx].color *= materialColor;
+					pathSegments_out[idx].ray.origin = pathSegments_in[idx].ray.origin + intersection.t * pathSegments_in[idx].ray.direction + intersection.surfaceNormal * 0.001f;
+					pathSegments_out[idx].ray.direction = calculateRandomDirectionInHemisphere(intersection.surfaceNormal, rng);
+					pathSegments_out[idx].color *= materialColor;
 				}
 
-				if (--pathSegments[idx].remainingBounces == 0) {
-					pathSegments[idx].color = glm::vec3(0.0f);
-					pathSegments[idx].isTerminated = true;
+				pathSegments_out[idx].remainingBounces = pathSegments_in[idx].remainingBounces - 1;
+				if (pathSegments_out[idx].remainingBounces == 0) {
+					pathSegments_out[idx].color = glm::vec3(0.0f);
+					pathSegments_out[idx].isTerminated = true;
 				}
 			}
 			// If there was no intersection, color the ray black.
@@ -424,14 +457,14 @@ __global__ void shadeMaterial(
 			// This can be useful for post-processing and image compositing.
 		}
 		else {
-			pathSegments[idx].color = glm::vec3(0.0f);
-			pathSegments[idx].isTerminated = true;
+			pathSegments_out[idx].color = glm::vec3(0.0f);
+			pathSegments_out[idx].isTerminated = true;
 		}
 	}
 }
 
 // Add the current iteration's output to the overall image
-__global__ void finalGather(glm::ivec2 resolution, glm::vec3 * image, PathSegment * iterationPaths, int antiAliasing)
+__global__ void finalGather(glm::ivec2 resolution, glm::vec3 * image, PathSegment * iterationPaths, int antiAliasing, glm::vec3* image_edges)
 {
 	//int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -440,21 +473,17 @@ __global__ void finalGather(glm::ivec2 resolution, glm::vec3 * image, PathSegmen
 
 	if (x < resolution.x && y < resolution.y) {
 		int index = x + (y * resolution.x);
+		bool supersample = antiAliasing == ADAPTIVE && image_edges[index].x > 0;
 
-		if (antiAliasing) {
-			image[index] += iterationPaths[4 * index].color;
-			image[index] += iterationPaths[4 * index + 1].color;
-			image[index] += iterationPaths[4 * index + 2].color;
-			image[index] += iterationPaths[4 * index + 3].color;
+		if (antiAliasing == AA || (antiAliasing == ADAPTIVE && supersample)) {
+			image[index] += iterationPaths[4 * index].color + 
+				iterationPaths[4 * index + 1].color + 
+				iterationPaths[4 * index + 2].color + 
+				iterationPaths[4 * index + 3].color;
 		}
 		else {
-			PathSegment iterationPath = iterationPaths[index];
+			PathSegment iterationPath = iterationPaths[antiAliasing == ADAPTIVE ? 4 * index : index];
 			image[iterationPath.pixelIndex] += iterationPath.color;
-		}
-
-		int testIndex = 400 + (400 * 800);
-		if (index == testIndex) {
-			glm::vec3 color = image[testIndex];
 		}
 	}
 }
@@ -475,11 +504,11 @@ struct material_id_comparator
 	}
 };
 
-struct pixel_index_comparator
+struct path_id_comparator
 {
 	__host__ __device__ bool operator()(const PathSegment& p1, const PathSegment& p2)
 	{
-		return p1.pixelIndex < p2.pixelIndex;
+		return p1.pathId < p2.pathId;
 	}
 };
 
@@ -506,8 +535,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 	int num_paths = start_paths;
 
 	//Generate buffer with edge information
-	if (antiAliasing == ADAPTIVE && (depth == 0 && iter == 1)) {
-		generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> > (cam, iter, traceDepth, dev_paths, NOAA);
+	if (antiAliasing == ADAPTIVE && (iter == 1)) {
+		generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> > (cam, iter, traceDepth, dev_paths, NOAA, dev_image_edges);
 
 		computeIntersections << <numBlocksPixels, blockSize1d >> > (
 			depth, pixelcount, dev_paths, dev_geoms, hst_scene->geoms.size(), dev_intersections, dev_materials);
@@ -518,8 +547,14 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 	}
 
 	// Raycast
-	generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> >(cam, iter, traceDepth, dev_paths, antiAliasing);
-	checkCUDAError("generate camera ray");
+	if (!cacheFirstBounce || (iter == 1)) {
+		generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> >(cam, iter, traceDepth, dev_paths, antiAliasing, dev_image_edges);
+		checkCUDAError("generate camera ray");
+	}
+
+	if (iter == 1) {
+		cudaMemcpy(dev_paths_cached, dev_paths, sizeof(PathSegment) * start_paths, cudaMemcpyDeviceToDevice);
+	}
 
 	// Shoot rays into scene, bounce between objects, push shading chunks
 	bool iterationComplete = false;
@@ -539,7 +574,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 
 		//Cache first bounce
 		if (depth == 0 && iter == 1) {
-			cudaMemcpy(dev_intersections_cached, dev_intersections, sizeof(ShadeableIntersection) * num_paths, cudaMemcpyDeviceToDevice);
+			cudaMemcpy(dev_intersections_cached, dev_intersections, sizeof(ShadeableIntersection) * start_paths, cudaMemcpyDeviceToDevice);
 		}
 
 		//Sort by material on the first pass
@@ -550,38 +585,17 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 		//Compute path shading
 		if (cacheFirstBounce && depth == 0) {
 			shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
-				iter, num_paths, dev_intersections_cached, dev_paths, dev_materials);
+				depth, traceDepth, iter, start_paths, dev_intersections_cached, dev_paths_cached, dev_paths, dev_materials);
 			checkCUDAError("shadeMaterial failed!");
 		}
 		else {
 			shadeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
-				iter, num_paths, dev_intersections, dev_paths, dev_materials);
+				depth, traceDepth, iter, num_paths, dev_intersections, dev_paths, dev_paths, dev_materials);
 			checkCUDAError("shadeMaterial failed!");
 		}
 
 		//Compact paths
 		num_paths = thrust::partition(dev_thrust_paths, dev_thrust_paths + num_paths, is_not_terminated()) - dev_thrust_paths;
-
-		/*if (iter == 1) {
-			PathSegment* host_paths = (PathSegment*)malloc(sizeof(PathSegment) * start_paths);
-			ShadeableIntersection* host_inxs = (ShadeableIntersection*)malloc(sizeof(ShadeableIntersection) * start_paths);
-			cudaMemcpy(host_paths, dev_paths, sizeof(PathSegment) * start_paths, cudaMemcpyDeviceToHost);
-			cudaMemcpy(host_inxs, dev_intersections, sizeof(ShadeableIntersection) * start_paths, cudaMemcpyDeviceToHost);
-			printf("=============================\n");
-			printf("NUM PATHS: %d\n", num_paths);
-			int num_terminated = 0;
-			for (int i = 0; i < start_paths; i++) {
-			if (i == num_paths) {
-			printf("---------------\n");
-			}
-			printf("PATH %d - TERMINATED?: %d - PIXEL ID: %d - MAT ID: %d\n", i, host_paths[i].isTerminated, host_paths[i].pixelIndex, host_inxs[i].materialId);
-			if (host_paths[i].isTerminated)
-			num_terminated++;
-			}
-			printf("NUM TERMINATED: %d\n", num_terminated);
-			delete(host_paths);
-			delete(host_inxs);
-			}*/
 
 		depth++;
 		if (num_paths == 0) {
@@ -590,16 +604,16 @@ void pathtrace(uchar4 *pbo, int frame, int iter, bool sortByMat, bool cacheFirst
 	}
 
 	if (antiAliasing == AA || antiAliasing == ADAPTIVE) {
-		thrust::sort(dev_thrust_paths, dev_thrust_paths + start_paths, pixel_index_comparator());
+		thrust::sort(dev_thrust_paths, dev_thrust_paths + start_paths, path_id_comparator());
 	}
 
 	// Assemble this iteration and apply it to the image
-	finalGather << <blocksPerGrid2d, blockSize2d >> >(cam.resolution, dev_image, dev_paths, antiAliasing);
+	finalGather << <blocksPerGrid2d, blockSize2d >> >(cam.resolution, dev_image, dev_paths, antiAliasing, dev_image_edges);
 
 	///////////////////////////////////////////////////////////////////////////
 
 	//Process image data
-	processImage << <blocksPerGrid2d, blockSize2d >> >(cam.resolution, iter, dev_image, dev_image_result, antiAliasing);
+	processImage << <blocksPerGrid2d, blockSize2d >> >(cam.resolution, iter, dev_image, dev_image_result, antiAliasing, dev_image_edges);
 
 	// Send results to OpenGL buffer for rendering
 	if (viewEdges) {

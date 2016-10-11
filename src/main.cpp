@@ -172,6 +172,10 @@ void runCuda() {
 
 		// unmap buffer object
 		cudaGLUnmapBufferObject(pbo);
+		
+		if (iteration == 1000) {
+			saveImage();
+		}
 	}
 	else {
 		saveImage();
