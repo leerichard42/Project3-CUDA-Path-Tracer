@@ -242,7 +242,7 @@ __global__ void generateNormalData(Camera cam, int pixelCount, glm::vec3* image,
 			image[index] = glm::vec3(1.0f);
 		}
 		else {
-			image[index] = (0.5f * intersections[index].surfaceNormal + glm::vec3(0.5f)) *
+			image[index] = (0.5f * intersections[index].surfaceNormal + glm::vec3(0.5f)) +
 				materials[intersections[index].materialId].color;
 		}
 	}
@@ -281,7 +281,7 @@ __global__ void generateEdgeData(Camera cam, glm::vec3* image_normals, glm::vec3
 			abs(pix[0] - pix[8]) +
 			abs(pix[2] - pix[6])) / 4.0f;
 
-		if (glm::clamp(10.0f*delta, 0.0f, 1.0f) > 0.3f){
+		if (glm::clamp(5.0f*delta, 0.0f, 1.0f) > 0.1f){
 			image_edges[index] = glm::vec3(1.0f);
 		}
 	}
