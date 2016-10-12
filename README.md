@@ -34,6 +34,8 @@ Sorting the materials before each shading pass had very little effect on the ave
 
 #### Stochastic Supersampling and Adaptive Supersampling
 
+<img src="img/renders/cornell_scene/2000_noaa.png" width="400" height="400"><img src="img/renders/cornell_scene/2000_aa.png" width="400" height="400">
+
 Antialiasing was implemented through supersampling, in which pixels were divided into 4 quadrants, with a jittered ray cast through each subpixel. This method effectively renders the image at 4x resolution, reducing any aliasing artifacts.
 However, while supersampling allowed for antialiasing, it also required 4 times as many paths, and was much less efficient in terms of memory and time taken for the raycast.
 
